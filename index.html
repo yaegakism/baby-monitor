@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<title>Baby Monitor</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#111;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{width:min(760px,100%);margin:0 auto;padding:18px}h1{margin:8px 0 4px;font-size:26px}.muted{color:#aaa;font-size:14px;line-height:1.5}.card{margin-top:18px;padding:16px;border:1px solid #333;border-radius:16px;background:#191919}.modeButtons{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px}button{width:100%;min-height:52px;border:0;border-radius:14px;padding:12px 16px;font-size:17px;font-weight:700}button.primary{background:#fff;color:#111}button.secondary{background:#2a2a2a;color:#fff;border:1px solid #444}button.danger{background:#4a1d1d;color:#fff}input{width:100%;min-height:50px;border-radius:12px;border:1px solid #555;background:#0d0d0d;color:#fff;padding:0 14px;font-size:18px;letter-spacing:.12em;text-transform:uppercase}label{display:block;margin-bottom:8px;font-weight:700}video{width:100%;max-height:68vh;margin-top:14px;border-radius:14px;background:#000;object-fit:contain}.hidden{display:none!important}.status{margin-top:12px;padding:11px 12px;border-radius:10px;background:#222;color:#ddd;font-size:14px;word-break:break-word}.room{font-size:28px;font-weight:800;letter-spacing:.16em;text-align:center;padding:12px;margin:10px 0;background:#0b0b0b;border-radius:12px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.small{font-size:13px}
+</style>
+</head>
+<body>
+<main>
+<h1>Baby Monitor</h1>
+<div class="muted">古いスマホをカメラにして、家族のスマホから視聴します。</div>
+
+<section id="pinGate" class="card">
+<h2>家族PIN</h2>
+<div class="muted">6桁のPINを入力してください。この端末には保存できます。</div>
+<input id="pinInput" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" placeholder="6桁のPIN">
+<label style="margin-top:12px;font-weight:400"><input id="rememberPin" type="checkbox" checked style="width:auto;min-height:auto;letter-spacing:0;text-transform:none"> この端末に保存する</label>
+<button id="unlockButton" class="primary" style="margin-top:12px">このPINで使う</button>
+<div id="pinStatus" class="status">未認証</div>
+</section>
+
+<section id="home" class="hidden">
+<div class="modeButtons">
+<button id="cameraMode" class="primary">📷 カメラとして使う</button>
+<button id="viewerMode" class="secondary">👀 映像を見る</button>
+</div>
+</section>
+
+<section id="cameraPanel" class="card hidden">
+<h2>カメラ側</h2>
+<div class="muted">家族PINで保護されたルームへ配信します。</div>
+<button id="startCamera" class="primary">カメラ配信を開始</button>
+<video id="localVideo" autoplay playsinline muted></video>
+<div id="cameraStatus" class="status">待機中</div>
+<div class="row">
+<button id="dimScreen" class="secondary">画面を暗くする</button>
+<button id="stopCamera" class="danger">配信停止</button>
+</div>
+</section>
+
+<section id="viewerPanel" class="card hidden">
+<h2>視聴側</h2>
+<div class="muted">家族PINで保護されたルームへ接続します。</div>
+<button id="startViewer" class="primary" style="margin-top:12px">映像を見る</button>
+<video id="remoteVideo" autoplay playsinline controls></video>
+<div id="viewerStatus" class="status">待機中</div>
+<button id="stopViewer" class="danger" style="margin-top:10px">視聴終了</button>
+</section>
+
+<section class="card small">
+<b>家族PIN対応版</b><br>
+PINそのものはGitHubやFirebaseへ保存せず、このブラウザ内だけに保存できます。PINから接続先ルームIDを生成します。
+</section>
+</main>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getDatabase, ref, set, get, onValue, onChildAdded, push, remove, onDisconnect } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBn1k27mt9gBBKIhLKhhlK9aSCqZ0eTdbI",
+  authDomain: "baby-monitor-bb4ae.firebaseapp.com",
+  databaseURL: "https://baby-monitor-bb4ae-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "baby-monitor-bb4ae",
+  storageBucket: "baby-monitor-bb4ae.firebasestorage.app",
+  messagingSenderId: "1053013174850",
+  appId: "1:1053013174850:web:124e5339c9de57a7081bdb"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getDatabase(app);
+
+const rtcConfig = { iceServers: [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" }
+]};
+
+const $ = id => document.getElementById(id);
+const home = $("home"), cameraPanel = $("cameraPanel"), viewerPanel = $("viewerPanel");
+const localVideo = $("localVideo"), remoteVideo = $("remoteVideo");
+const cameraStatus = $("cameraStatus"), viewerStatus = $("viewerStatus");
+
+let authReady = null;
+const authReadyPromise = new Promise((resolve, reject) => {
+  authReady = resolve;
+  onAuthStateChanged(auth, user => {
+    if (user) resolve(user);
+  });
+  signInAnonymously(auth).catch(reject);
+});
+
+async function ensureAuth() {
+  const user = await authReadyPromise;
+  if (!user) throw new Error("Firebase認証に失敗しました");
+  return user;
+}
+
+const FIXED_ROOM_SEED = "K7M4Q9TP";
+let localStream=null, hostRoom=null, hostRequestUnsub=null;
+let familyPin=null;
+const hostPeers=new Map();
+let viewerPc=null, viewerId=null, viewerRoom=null;
+
+async function sha256Hex(text){
+  const bytes=new TextEncoder().encode(text);
+  const digest=await crypto.subtle.digest("SHA-256",bytes);
+  return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+async function setFamilyPin(pin){
+  if(!/^\d{6}$/.test(pin)) throw new Error("PINは6桁の数字にしてください");
+  familyPin=pin;
+  const hash=await sha256Hex(FIXED_ROOM_SEED+":"+pin);
+  hostRoom="r_"+hash.slice(0,40);
+}
+
+function show(panel){
+  home.classList.add("hidden"); cameraPanel.classList.add("hidden"); viewerPanel.classList.add("hidden");
+  panel.classList.remove("hidden");
+}
+
+const savedPin=localStorage.getItem("babyMonitorFamilyPin");
+if(savedPin){
+  $("pinInput").value=savedPin;
+  $("pinStatus").textContent="保存済みPINがあります";
+}
+
+$("unlockButton").onclick=async()=>{
+  try{
+    $("unlockButton").disabled=true;
+    $("pinStatus").textContent="準備しています…";
+    const rawPin=$("pinInput").value;
+    const pin=rawPin.normalize("NFKC").replace(/[^0-9]/g,"");
+    $("pinInput").value=pin;
+    await setFamilyPin(pin);
+    if($("rememberPin").checked) localStorage.setItem("babyMonitorFamilyPin",pin);
+    else localStorage.removeItem("babyMonitorFamilyPin");
+    $("pinGate").classList.add("hidden");
+    home.classList.remove("hidden");
+  }catch(e){
+    $("pinStatus").textContent="エラー: "+e.message;
+  }finally{
+    $("unlockButton").disabled=false;
+  }
+};
+
+$("cameraMode").onclick=()=>show(cameraPanel);
+$("viewerMode").onclick=()=>show(viewerPanel);
+$("startCamera").onclick=startCameraHost;
+$("stopCamera").onclick=stopCameraHost;
+$("startViewer").onclick=startViewer;
+$("stopViewer").onclick=stopViewer;
+
+$("dimScreen").onclick=()=>{
+  document.body.style.background="#000";
+  document.querySelectorAll("main > *").forEach(el=>el.style.opacity="0.06");
+  cameraStatus.textContent="配信中（画面タップで明るさを戻せます）";
+  const restore=()=>{
+    document.body.style.background="#111";
+    document.querySelectorAll("main > *").forEach(el=>el.style.opacity="");
+    document.removeEventListener("click",restore,true);
+  };
+  setTimeout(()=>document.addEventListener("click",restore,true),300);
+};
+
+async function startCameraHost(){
+  try{
+    $("startCamera").disabled=true;
+    cameraStatus.textContent="認証しています…";
+    await ensureAuth();
+
+    cameraStatus.textContent="カメラとマイクを起動しています…";
+    localStream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},
+      audio:true
+    });
+    localVideo.srcObject=localStream;
+
+    const roomRef=ref(db,`rooms/${hostRoom}`);
+    await remove(roomRef);
+    await set(ref(db,`rooms/${hostRoom}/host`),{online:true,startedAt:Date.now()});
+    onDisconnect(roomRef).remove();
+
+    hostRequestUnsub=onChildAdded(ref(db,`rooms/${hostRoom}/viewers`),async snap=>{
+      const id=snap.key, data=snap.val()||{};
+      if(!data.requested||hostPeers.has(id)) return;
+      await createHostPeer(id);
+    });
+    cameraStatus.textContent=`配信待機中。部屋番号 ${hostRoom} で接続できます。`;
+  }catch(e){
+    console.error(e); cameraStatus.textContent="エラー: "+e.message; $("startCamera").disabled=false;
+  }
+}
+
+async function createHostPeer(id){
+  const pc=new RTCPeerConnection(rtcConfig); hostPeers.set(id,pc);
+  for(const track of localStream.getTracks()) pc.addTrack(track,localStream);
+  const base=`rooms/${hostRoom}/viewers/${id}`;
+
+  pc.onicecandidate=async e=>{
+    if(e.candidate) await set(push(ref(db,`${base}/hostCandidates`)),e.candidate.toJSON());
+  };
+  pc.onconnectionstatechange=()=>{
+    cameraStatus.textContent=`視聴端末: ${hostPeers.size}台 / ${pc.connectionState}`;
+    if(["failed","closed"].includes(pc.connectionState)){pc.close();hostPeers.delete(id)}
+  };
+  onChildAdded(ref(db,`${base}/viewerCandidates`),snap=>{
+    const c=snap.val(); if(c) pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.warn);
+  });
+  const answerUnsub=onValue(ref(db,`${base}/answer`),async snap=>{
+    const answer=snap.val();
+    if(answer&&!pc.currentRemoteDescription){
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      answerUnsub();
+    }
+  });
+  const offer=await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await set(ref(db,`${base}/offer`),{type:offer.type,sdp:offer.sdp});
+}
+
+async function stopCameraHost(){
+  if(hostRequestUnsub) hostRequestUnsub();
+  for(const pc of hostPeers.values()) pc.close();
+  hostPeers.clear();
+  if(localStream) localStream.getTracks().forEach(t=>t.stop());
+  localStream=null; localVideo.srcObject=null;
+  if(hostRoom) await remove(ref(db,`rooms/${hostRoom}`));
+  cameraStatus.textContent="配信を停止しました";
+  $("startCamera").disabled=false;
+}
+
+async function startViewer(){
+  try{
+    viewerRoom=hostRoom;
+
+    $("startViewer").disabled=true;
+    viewerStatus.textContent="認証しています…";
+    await ensureAuth();
+
+    viewerStatus.textContent="カメラを探しています…";
+    const hostSnap=await get(ref(db,`rooms/${viewerRoom}/host/online`));
+    if(!hostSnap.exists()||hostSnap.val()!==true){
+      viewerStatus.textContent="その部屋のカメラはオンラインではありません";
+      $("startViewer").disabled=false; return;
+    }
+
+    viewerId=crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Date.now().toString(36);
+    const base=`rooms/${viewerRoom}/viewers/${viewerId}`;
+    const viewerRef=ref(db,base);
+    await set(viewerRef,{requested:true,requestedAt:Date.now()});
+    onDisconnect(viewerRef).remove();
+
+    viewerPc=new RTCPeerConnection(rtcConfig);
+    viewerPc.ontrack=e=>{
+      remoteVideo.srcObject=e.streams[0];
+      remoteVideo.play().catch(()=>{});
+      viewerStatus.textContent="映像を受信中";
+    };
+    viewerPc.onicecandidate=async e=>{
+      if(e.candidate) await set(push(ref(db,`${base}/viewerCandidates`)),e.candidate.toJSON());
+    };
+    viewerPc.onconnectionstatechange=()=>{viewerStatus.textContent=`接続状態: ${viewerPc.connectionState}`};
+    onChildAdded(ref(db,`${base}/hostCandidates`),snap=>{
+      const c=snap.val(); if(c) viewerPc.addIceCandidate(new RTCIceCandidate(c)).catch(console.warn);
+    });
+
+    const offerUnsub=onValue(ref(db,`${base}/offer`),async snap=>{
+      const offer=snap.val();
+      if(!offer||viewerPc.currentRemoteDescription) return;
+      await viewerPc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer=await viewerPc.createAnswer();
+      await viewerPc.setLocalDescription(answer);
+      await set(ref(db,`${base}/answer`),{type:answer.type,sdp:answer.sdp});
+      offerUnsub();
+      viewerStatus.textContent="接続しています…";
+    });
+  }catch(e){
+    console.error(e); viewerStatus.textContent="エラー: "+e.message; $("startViewer").disabled=false;
+  }
+}
+
+async function stopViewer(){
+  if(viewerPc) viewerPc.close();
+  viewerPc=null; remoteVideo.srcObject=null;
+  if(viewerRoom&&viewerId) await remove(ref(db,`rooms/${viewerRoom}/viewers/${viewerId}`));
+  viewerStatus.textContent="視聴を終了しました"; $("startViewer").disabled=false; viewerId=null;
+}
+</script>
+</body>
+</html>
